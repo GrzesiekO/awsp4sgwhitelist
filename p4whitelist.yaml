@@ -1,0 +1,262 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: The name of the S3 bucket to create
+  SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: The ID of the security group to use for whitelisting IPs
+
+Resources:
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: DeveloperUserPool
+      AutoVerifiedAttributes:
+        - email
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: DeveloperUserPoolClient
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  APIGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: DeveloperAPI
+
+  WhitelistLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Environment:
+        Variables:
+          SG_ID: !Ref SecurityGroupId
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from botocore.exceptions import ClientError
+
+          ec2 = boto3.client('ec2')
+
+          def lambda_handler(event, context):
+              ip = event['ip']
+              sg_id = os.environ.get('SG_ID')
+
+              if not sg_id:
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps('Security Group ID not provided')
+                  }
+
+              try:
+                  # Check if the ingress rule already exists
+                  existing_rules = ec2.describe_security_groups(
+                      Filters=[
+                          {
+                              'Name': 'ip-permission.cidr',
+                              'Values': [f'{ip}/32']
+                          },
+                          {
+                              'Name': 'ip-permission.from-port',
+                              'Values': ['1666']
+                          },
+                          {
+                              'Name': 'ip-permission.to-port',
+                              'Values': ['1666']
+                          },
+                          {
+                              'Name': 'ip-permission.protocol',
+                              'Values': ['tcp']
+                          },
+                          {
+                              'Name': 'group-id',
+                              'Values': [sg_id]
+                          }
+                      ]
+                  )
+
+                  if existing_rules['SecurityGroups']:
+                      for security_group in existing_rules['SecurityGroups']:
+                          for ingress_rule in security_group['IpPermissions']:
+                              if ingress_rule['IpProtocol'] == 'tcp' and ingress_rule['FromPort'] == 1666 and ingress_rule['ToPort'] == 1666:
+                                  for ip_range in ingress_rule['IpRanges']:
+                                      if ip_range['CidrIp'] == f'{ip}/32':
+                                          return {
+                                              'statusCode': 200,
+                                              'body': json.dumps('IP already whitelisted')
+                                          }
+
+                  # Authorize the ingress rule
+                  response = ec2.authorize_security_group_ingress(
+                      GroupId=sg_id,
+                      IpPermissions=[
+                          {
+                              'IpProtocol': 'tcp',
+                              'FromPort': 1666,
+                              'ToPort': 1666,
+                              'IpRanges': [{'CidrIp': f'{ip}/32'}]
+                          }
+                      ]
+                  )
+
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('IP Whitelisted Successfully')
+                  }
+
+              except ClientError as e:
+                  error_message = e.response['Error']['Message']
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {error_message}')
+                  }
+
+  RemoveWhitelistLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Environment:
+        Variables:
+          SG_ID: !Ref SecurityGroupId
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          ec2 = boto3.client('ec2')
+
+          def lambda_handler(event, context):
+              ip = event['ip']
+              sg_id = os.environ['SG_ID']
+
+              response = ec2.revoke_security_group_ingress(
+                  GroupId=sg_id,
+                  IpPermissions=[
+                      {
+                          'IpProtocol': 'tcp',
+                          'FromPort': 1666,
+                          'ToPort': 1666,
+                          'IpRanges': [{'CidrIp': f'{ip}/32'}]
+                      }
+                  ]
+              )
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('IP Removed from Whitelist')
+              }
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:AuthorizeSecurityGroupIngress
+                  - ec2:RevokeSecurityGroupIngress
+                  - ec2:DescribeSecurityGroupRules
+                  - ec2:DescribeSecurityGroups
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  APIGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt APIGateway.RootResourceId
+      PathPart: whitelist
+      RestApiId: !Ref APIGateway
+
+  APIGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref APIGatewayCognitoAuthorizer
+      HttpMethod: POST
+      ResourceId: !Ref APIGatewayResource
+      RestApiId: !Ref APIGateway
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: 
+          Fn::Sub: arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WhitelistLambda.Arn}/invocations
+
+  APIGatewayCognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt CognitoUserPool.Arn
+      RestApiId: !Ref APIGateway
+      Type: COGNITO_USER_POOLS
+
+  ScheduledEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: rate(12 hours)
+      Targets:
+        - Arn: !GetAtt RemoveWhitelistLambda.Arn
+          Id: RemoveWhitelistLambdaTarget
+
+  LambdaPermissionForAPIGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt WhitelistLambda.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${APIGateway}/*/*/whitelist
+
+  LambdaPermissionForScheduledEvent:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt RemoveWhitelistLambda.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledEvent.Arn
+
+Outputs:
+  WebsiteURL:
+    Description: URL for S3 Bucket Website
+    Value: !GetAtt S3Bucket.WebsiteURL
+
+  APIGatewayURL:
+    Description: URL for API Gateway
+    Value: !Sub
+      - https://${APIGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/whitelist
+      - APIGateway: !Ref APIGateway

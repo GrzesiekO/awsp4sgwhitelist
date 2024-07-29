@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IP Whitelisting</title>
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.751.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@5.2.3/dist/amazon-cognito-identity.min.js"></script>
+</head>
+<body>
+    <h1>Whitelisting Developer IP</h1>
+    <button id="whitelistButton">Whitelist My IP</button>
+
+    <script>
+        // Cognito configuration
+        const cognitoConfig = {
+            UserPoolId: 'USER_POOL_ID',
+            ClientId: 'CLIENT_ID',
+            Region: 'AWS_REGION'
+        };
+
+        // AWS configuration
+        AWS.config.region = cognitoConfig.Region;
+
+        // Cognito authentication
+        const userPool = new AmazonCognitoIdentity.CognitoUserPool({
+            UserPoolId: cognitoConfig.UserPoolId,
+            ClientId: cognitoConfig.ClientId
+        });
+
+        let cognitoUser = userPool.getCurrentUser();
+
+        if (!cognitoUser) {
+            // Redirect to login if user is not logged in
+            window.location.href = 'login.html';
+        }
+
+        // API Gateway URL
+        const apiGatewayUrl = 'https://API_GW.amazonaws.com/prod/whitelist';
+
+        // Function to get user's IP
+        function getIpAddress(callback) {
+            fetch('https://api64.ipify.org?format=json')
+                .then(response => response.json())
+                .then(data => callback(data.ip))
+                .catch(error => console.error('Error fetching IP address:', error));
+        }
+
+        // Function to whitelist IP
+        function whitelistIp(ip) {
+            cognitoUser.getSession((err, session) => {
+                if (err) {
+                    console.error(err);
+                    return;
+                }
+
+                const idToken = session.getIdToken().getJwtToken();
+
+                fetch(apiGatewayUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': idToken,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ ip: ip })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log(data);
+                    alert('IP Whitelisted Successfully');
+                })
+                .catch(error => console.error('Error whitelisting IP:', error));
+            });
+        }
+
+        // Button click event
+        document.getElementById('whitelistButton').addEventListener('click', () => {
+            getIpAddress((ip) => {
+                whitelistIp(ip);
+            });
+        });
+    </script>
+</body>
+</html>

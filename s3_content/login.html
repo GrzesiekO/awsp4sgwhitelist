@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login</title>
+    <script src="https://sdk.amazonaws.com/js/aws-sdk-2.751.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/amazon-cognito-identity-js@5.2.3/dist/amazon-cognito-identity.min.js"></script>
+</head>
+<body>
+    <h1>Login</h1>
+    <form id="loginForm">
+        <input type="email" id="email" placeholder="Email" required><br>
+        <input type="password" id="password" placeholder="Password" required><br>
+        <button type="submit">Login</button>
+    </form>
+
+    <script>
+        const cognitoConfig = {
+            UserPoolId: 'USER_POOL_ID',
+            ClientId: 'CLIENT_ID',
+            Region: 'AWS_REGION'
+        };
+
+        AWS.config.region = cognitoConfig.Region;
+
+        const userPool = new AmazonCognitoIdentity.CognitoUserPool({
+            UserPoolId: cognitoConfig.UserPoolId,
+            ClientId: cognitoConfig.ClientId
+        });
+
+        document.getElementById('loginForm').addEventListener('submit', (event) => {
+            event.preventDefault();
+            const email = document.getElementById('email').value;
+            const password = document.getElementById('password').value;
+
+            const authenticationDetails = new AmazonCognitoIdentity.AuthenticationDetails({
+                Username: email,
+                Password: password
+            });
+
+            const userData = {
+                Username: email,
+                Pool: userPool
+            };
+
+            const cognitoUser = new AmazonCognitoIdentity.CognitoUser(userData);
+
+            cognitoUser.authenticateUser(authenticationDetails, {
+                onSuccess: (result) => {
+                    console.log('Login successful');
+                    window.location.href = 'index.html';
+                },
+                onFailure: (err) => {
+                    alert(err.message || JSON.stringify(err));
+                }
+            });
+        });
+    </script>
+</body>
+</html>
